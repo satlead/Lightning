@@ -459,6 +459,55 @@ export default class Component extends Element {
         }
     }
 
+    /**
+     * Fires the specified event downwards.
+     * A descendant that wishes to handle the signal should set the '_broadcasts' property on this component.
+     * @warn handling a broadcast will stop it from propagating; to continue propagation return false from the state
+     * event handler.
+     */
+    broadcast(event, args = {}) {
+        if (!Utils.isObjectLiteral(args)) {
+            this._throwError("Broadcast: args must be object");
+        }
+
+        if (!args._source) {
+            args = Object.assign({_source: this}, {args});
+        }
+
+        if (this.__broadcasts) {
+            let fireEvent = this.__broadcasts[event];
+            if (fireEvent === false) {
+                return;
+            }
+            if (fireEvent) {
+                if (fireEvent === true) {
+                    fireEvent = event;
+                }
+                if (this._hasMethod(fireEvent)) {
+                    return this[fireEvent](args);
+                }
+            }
+        }
+
+        // Propagate down.
+        const subs = [];
+        Component.collectSubComponents(subs, this);
+        for (let i = 0, n = subs.length; i < n; i++) {
+            subs[i].broadcast(event, args);
+        }
+    }
+
+    get broadcasts() {
+        return this.__broadcasts;
+    }
+
+    set broadcasts(v) {
+        if (!Utils.isObjectLiteral(v)) {
+            this._throwError("Broadcasts: specify an object with broadcast-to-fire mappings");
+        }
+        this.__broadcasts = Object.assign(this.__broadcasts || {}, v);
+    }
+
     static collectSubComponents(subs, element) {
         if (element.hasChildren()) {
             const childList = element.__childList;
