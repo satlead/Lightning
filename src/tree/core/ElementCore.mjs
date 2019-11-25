@@ -698,7 +698,7 @@ export default class ElementCore {
         this._localTb = b;
         this._localTc = c;
         this._localTd = d;
-        
+
         // We also regard negative scaling as a complex case, so that we can optimize the non-complex case better.
         this._isComplex = (b !== 0) || (c !== 0) || (a < 0) || (d < 0);
     };
@@ -1285,6 +1285,383 @@ export default class ElementCore {
         return this._boundsMargin;
     }
 
+    _updateWorldCoordinates() {
+        const pw = this._parent._worldContext;
+        let w = this._worldContext;
+        const visible = (pw.alpha && this._localAlpha);
+
+        // Update world coords/alpha.
+        if (this._tempRecalc & 1) {
+            if (!w.alpha && visible) {
+                // Becomes visible.
+                this._hasRenderUpdates = 3;
+            }
+            w.alpha = pw.alpha * this._localAlpha;
+
+            if (w.alpha < 1e-14) {
+                // Tiny rounding errors may cause failing visibility tests.
+                w.alpha = 0;
+            }
+        }
+
+        if (this._tempRecalc & 6) {
+            w.px = pw.px + this._localPx * pw.ta;
+            w.py = pw.py + this._localPy * pw.td;
+            if (pw.tb !== 0) w.px += this._localPy * pw.tb;
+            if (pw.tc !== 0) w.py += this._localPx * pw.tc;
+        }
+
+        if (this._tempRecalc & 4) {
+            w.ta = this._localTa * pw.ta;
+            w.tb = this._localTd * pw.tb;
+            w.tc = this._localTa * pw.tc;
+            w.td = this._localTd * pw.td;
+
+            if (this._isComplex) {
+                w.ta += this._localTc * pw.tb;
+                w.tb += this._localTb * pw.ta;
+                w.tc += this._localTc * pw.td;
+                w.td += this._localTb * pw.tc;
+            }
+        }
+    }
+
+    _updateRenderCoordinates() {
+        const pr = this._parent._renderContext;
+        const init = this._renderContext === this._worldContext;
+        if (init) {
+            // First render context build: make sure that it is fully initialized correctly.
+            // Otherwise, if we get into bounds later, the render context would not be initialized correctly.
+            this._renderContext = new ElementCoreContext();
+        }
+
+        const r = this._renderContext;
+
+        // Update world coords/alpha.
+        if (init || (this._tempRecalc & 1)) {
+            r.alpha = pr.alpha * this._localAlpha;
+
+            if (r.alpha < 1e-14) {
+                r.alpha = 0;
+            }
+        }
+
+        if (init || (this._tempRecalc & 6)) {
+            r.px = pr.px + this._localPx * pr.ta;
+            r.py = pr.py + this._localPy * pr.td;
+            if (pr.tb !== 0) r.px += this._localPy * pr.tb;
+            if (pr.tc !== 0) r.py += this._localPx * pr.tc;
+        }
+
+        if (init) {
+            // We set the recalc toggle, because we must make sure that the scissor is updated.
+            this._tempRecalc |= 2;
+        }
+
+        if (init || (this._tempRecalc & 4)) {
+            r.ta = this._localTa * pr.ta;
+            r.tb = this._localTd * pr.tb;
+            r.tc = this._localTa * pr.tc;
+            r.td = this._localTd * pr.td;
+
+            if (this._isComplex) {
+                r.ta += this._localTc * pr.tb;
+                r.tb += this._localTb * pr.ta;
+                r.tc += this._localTc * pr.td;
+                r.td += this._localTb * pr.tc;
+            }
+        }
+    }
+
+    _determineRenderToTexture() {
+        // Determine whether we must use a 'renderTexture'.
+        const useRenderToTexture = this._renderToTextureEnabled && this._texturizer.mustRenderToTexture();
+        if (this._useRenderToTexture !== useRenderToTexture) {
+            // Coords must be changed.
+            this._recalc |= 2 + 4;
+
+            // Scissor may change: force update.
+            this._tempRecalc |= 2;
+
+            if (!this._useRenderToTexture) {
+                // We must release the texture.
+                this._texturizer.release();
+            }
+        }
+        this._useRenderToTexture = useRenderToTexture;
+
+    }
+
+    _checkRenderContext() {
+        if (this._parent._hasRenderContext()) {
+            return this._updateRenderCoordinates();
+        } else {
+            this._renderContext = this._worldContext;
+        }
+    }
+
+
+    _checkClipping() {
+        const r = this._renderContext;
+        const bboxW = this._dimsUnknown ? 2048 : this._w;
+        const bboxH = this._dimsUnknown ? 2048 : this._h;
+        const pr = this._parent._renderContext;
+        let sx, sy, ex, ey;
+        const rComplex = (r.tb !== 0) || (r.tc !== 0) || (r.ta < 0) || (r.td < 0);
+        if (rComplex) {
+            sx = Math.min(0, bboxW * r.ta, bboxW * r.ta + bboxH * r.tb, bboxH * r.tb) + r.px;
+            ex = Math.max(0, bboxW * r.ta, bboxW * r.ta + bboxH * r.tb, bboxH * r.tb) + r.px;
+            sy = Math.min(0, bboxW * r.tc, bboxW * r.tc + bboxH * r.td, bboxH * r.td) + r.py;
+            ey = Math.max(0, bboxW * r.tc, bboxW * r.tc + bboxH * r.td, bboxH * r.td) + r.py;
+        } else {
+            sx = r.px;
+            ex = r.px + r.ta * bboxW;
+            sy = r.py;
+            ey = r.py + r.td * bboxH;
+        }
+
+        if (this._dimsUnknown && (rComplex || this._localTa < 1 || this._localTb < 1)) {
+            // If we are dealing with a non-identity matrix, we must extend the bbox so that withinBounds and
+            //  scissors will include the complete range of (positive) dimensions up to ,lh.
+            const nx = this._x * pr.ta + this._y * pr.tb + pr.px;
+            const ny = this._x * pr.tc + this._y * pr.td + pr.py;
+            if (nx < sx) sx = nx;
+            if (ny < sy) sy = ny;
+            if (nx > ex) ex = nx;
+            if (ny > ey) ey = ny;
+        }
+        if (this._tempRecalc & 6 || !this._scissor /* initial */) {
+            // Determine whether we must 'clip'.
+            if (this._clipping && r.isSquare()) {
+                // If the parent renders to a texture, it's scissor should be ignored;
+                const area = this._parent._useRenderToTexture ? this._parent._viewport : this._parent._scissor;
+                if (area) {
+                    // Merge scissor areas.
+                    const lx = Math.max(area[0], sx);
+                    const ly = Math.max(area[1], sy);
+                    this._scissor = [
+                        lx,
+                        ly,
+                        Math.min(area[2] + area[0], ex) - lx,
+                        Math.min(area[3] + area[1], ey) - ly
+                    ];
+                } else {
+                    this._scissor = [sx, sy, ex - sx, ey - sy];
+                }
+            } else {
+                // No clipping: reuse parent scissor.
+                this._scissor = this._parent._useRenderToTexture ? this._parent._viewport : this._parent._scissor;
+            }
+        }
+        return [sx, sy, ex, ey];
+    }
+
+    _calculateOutOfBoundsMargin() {
+        // Calculate the outOfBounds margin.
+        if (this._boundsMargin) {
+            this._recBoundsMargin = this._boundsMargin;
+        } else {
+            this._recBoundsMargin = this._parent._recBoundsMargin;
+        }
+
+    }
+
+    _handleAfterCalc(sx, sy, ex, ey) {
+        // Recalculate bbox.
+        if (rComplex) {
+            sx = Math.min(0, bboxW * r.ta, bboxW * r.ta + bboxH * r.tb, bboxH * r.tb) + r.px;
+            ex = Math.max(0, bboxW * r.ta, bboxW * r.ta + bboxH * r.tb, bboxH * r.tb) + r.px;
+            sy = Math.min(0, bboxW * r.tc, bboxW * r.tc + bboxH * r.td, bboxH * r.td) + r.py;
+            ey = Math.max(0, bboxW * r.tc, bboxW * r.tc + bboxH * r.td, bboxH * r.td) + r.py;
+        } else {
+            sx = r.px;
+            ex = r.px + r.ta * bboxW;
+            sy = r.py;
+            ey = r.py + r.td * bboxH;
+        }
+
+        if (this._dimsUnknown && (rComplex || this._localTa < 1 || this._localTb < 1)) {
+            const nx = this._x * pr.ta + this._y * pr.tb + pr.px;
+            const ny = this._x * pr.tc + this._y * pr.td + pr.py;
+            if (nx < sx) sx = nx;
+            if (ny < sy) sy = ny;
+            if (nx > ex) ex = nx;
+            if (ny > ey) ey = ny;
+        }
+
+        return [sx, sy, ex, ey];
+    }
+
+    _recheckOutOfBounds(sx, sy, ex, ey) {
+        this._outOfBounds = 0;
+        let withinMargin = true;
+
+        // Offscreens are always rendered as long as the parent is within bounds.
+        if (!this._renderToTextureEnabled || !this._texturizer || !this._texturizer.renderOffscreen) {
+            if (this._scissor && (this._scissor[2] <= 0 || this._scissor[3] <= 0)) {
+                // Empty scissor area.
+                this._outOfBounds = 2;
+            } else {
+                // Use bbox to check out-of-boundness.
+                if ((this._scissor[0] > ex) ||
+                    (this._scissor[1] > ey) ||
+                    (sx > (this._scissor[0] + this._scissor[2])) ||
+                    (sy > (this._scissor[1] + this._scissor[3]))
+                ) {
+                    this._outOfBounds = 1;
+                }
+
+                if (this._outOfBounds) {
+                    if (this._clipping || this._useRenderToTexture || (this._clipbox && (bboxW && bboxH))) {
+                        this._outOfBounds = 2;
+                    }
+                }
+            }
+
+            withinMargin = (this._outOfBounds === 0);
+            if (!withinMargin) {
+                // Re-test, now with margins.
+                if (this._recBoundsMargin) {
+                    withinMargin = !((ex < this._scissor[0] - this._recBoundsMargin[2]) ||
+                        (ey < this._scissor[1] - this._recBoundsMargin[3]) ||
+                        (sx > this._scissor[0] + this._scissor[2] + this._recBoundsMargin[0]) ||
+                        (sy > this._scissor[1] + this._scissor[3] + this._recBoundsMargin[1]))
+                } else {
+                    withinMargin = !((ex < this._scissor[0] - 100) ||
+                        (ey < this._scissor[1] - 100) ||
+                        (sx > this._scissor[0] + this._scissor[2] + 100) ||
+                        (sy > this._scissor[1] + this._scissor[3] + 100))
+                }
+                if (withinMargin && this._outOfBounds === 2) {
+                    // Children must be visited because they may contain elements that are within margin, so must be visible.
+                    this._outOfBounds = 1;
+                }
+            }
+        }
+
+        if (this._withinBoundsMargin !== withinMargin) {
+            this._withinBoundsMargin = withinMargin;
+
+            if (this._withinBoundsMargin) {
+                // This may update things (txLoaded events) in the element itself, but also in descendants and ancestors.
+
+                // Changes in ancestors should be executed during the next call of the stage update. But we must
+                // take care that the _recalc and _hasUpdates flags are properly registered. That's why we clear
+                // both before entering the children, and use _pRecalc to transfer inherited updates instead of
+                // _recalc directly.
+
+                // Changes in descendants are automatically executed within the current update loop, though we must
+                // take care to not update the hasUpdates flag unnecessarily in ancestors. We achieve this by making
+                // sure that the hasUpdates flag of this element is turned on, which blocks it for ancestors.
+                this._hasUpdates = true;
+
+                const recalc = this._recalc;
+                this._recalc = 0;
+                this.element._enableWithinBoundsMargin();
+
+                if (this._recalc) {
+                    // This element needs to be re-updated now, because we want the dimensions (and other changes) to be updated.
+                    return this.update();
+                }
+
+                this._recalc = recalc;
+            } else {
+                this.element._disableWithinBoundsMargin();
+            }
+        }
+    }
+
+
+    _updateChildren() {
+        if (this._outOfBounds < 2) {
+            if (this._useRenderToTexture) {
+                if (this._worldContext.isIdentity()) {
+                    // Optimization.
+                    // The world context is already identity: use the world context as render context to prevents the
+                    // ancestors from having to update the render context.
+                    this._renderContext = this._worldContext
+                } else {
+                    // Temporarily replace the render coord attribs by the identity matrix.
+                    // This allows the children to calculate the render context.
+                    this._renderContext = ElementCoreContext.IDENTITY;
+                }
+            }
+
+            if (this._children) {
+                for (let i = 0, n = this._children.length; i < n; i++) {
+                    this._children[i].update();
+                }
+            }
+
+            if (this._useRenderToTexture) {
+                this._renderContext = r;
+            }
+        } else {
+            if (this._children) {
+                for (let i = 0, n = this._children.length; i < n; i++) {
+                    if (this._children[i]._hasUpdates) {
+                        this._children[i].update();
+                    } else {
+                        // Make sure we don't lose the 'inherited' updates.
+                        this._children[i]._recalc |= this._pRecalc;
+                        this._children[i].updateOutOfBounds();
+                    }
+                }
+            }
+        }
+    }
+
+    _update() {
+        this._tempRecalc = this._recalc;
+        this._updateWorldCoordinates();
+        this._checkRenderContext();
+        this._determineRenderToTexture();
+
+        //[sx, sy, ex, ey]
+        let coordinates = this._checkClipping();
+        this._calculateOutOfBoundsMargin();
+        if (this._onAfterCalcs && this._onAfterCalcs(this.element)) {
+            // After calcs may change render coords, scissor and/or recBoundsMargin.
+            coordinates = this._handleAfterCalc(coordinates[0], coordinates[1], coordinates[2], coordinates[3]);
+        }
+
+        if (this._parent._outOfBounds === 2) {
+            // Inherit parent out of boundsness.
+            this._outOfBounds = 2;
+
+            if (this._withinBoundsMargin) {
+                this._withinBoundsMargin = false;
+                this.element._disableWithinBoundsMargin();
+            }
+        } else if (this._tempRecalc & 6) {
+            // Recheck if element is out-of-bounds (all settings that affect this should enable recalc bit 2 or 4).
+            this._recheckOutOfBounds(coordinates[0], coordinates[1], coordinates[2], coordinates[3]);
+        }
+
+        if (this._useRenderToTexture) {
+            // Set viewport necessary for children scissor calculation.
+            if (this._viewport) {
+                this._viewport[2] = bboxW;
+                this._viewport[3] = bboxH;
+            } else {
+                this._viewport = [0, 0, bboxW, bboxH];
+            }
+        }
+
+        // Filter out bits that should not be copied to the children (currently all are).
+        this._pRecalc = (this._recalc & 135);
+
+        // Clear flags so that future updates are properly detected.
+        this._recalc = 0;
+        this._hasUpdates = false;
+
+        this._updateChildren();
+
+        if (this._onAfterUpdate) {
+            this._onAfterUpdate(this.element);
+        }
+    }
+
     update() {
         this._recalc |= this._parent._pRecalc;
 
@@ -1302,362 +1679,14 @@ export default class ElementCore {
             this._onUpdate(this.element, this);
         }
 
-        const pw = this._parent._worldContext;
-        let w = this._worldContext;
-        const visible = (pw.alpha && this._localAlpha);
-
         /**
          * We must update if:
          * - branch contains updates (even when invisible because it may contain z-indexed descendants)
          * - there are (inherited) updates and this branch is visible
          * - this branch becomes invisible (descs may be z-indexed so we must update all alpha values)
          */
-        if (this._hasUpdates || (this._recalc && visible) || (w.alpha && !visible)) {
-            let recalc = this._recalc;
-
-            // Update world coords/alpha.
-            if (recalc & 1) {
-                if (!w.alpha && visible) {
-                    // Becomes visible.
-                    this._hasRenderUpdates = 3;
-                }
-                w.alpha = pw.alpha * this._localAlpha;
-
-                if (w.alpha < 1e-14) {
-                    // Tiny rounding errors may cause failing visibility tests.
-                    w.alpha = 0;
-                }
-            }
-
-            if (recalc & 6) {
-                w.px = pw.px + this._localPx * pw.ta;
-                w.py = pw.py + this._localPy * pw.td;
-                if (pw.tb !== 0) w.px += this._localPy * pw.tb;
-                if (pw.tc !== 0) w.py += this._localPx * pw.tc;
-            }
-
-            if (recalc & 4) {
-                w.ta = this._localTa * pw.ta;
-                w.tb = this._localTd * pw.tb;
-                w.tc = this._localTa * pw.tc;
-                w.td = this._localTd * pw.td;
-
-                if (this._isComplex) {
-                    w.ta += this._localTc * pw.tb;
-                    w.tb += this._localTb * pw.ta;
-                    w.tc += this._localTc * pw.td;
-                    w.td += this._localTb * pw.tc;
-                }
-            }
-
-            // Update render coords/alpha.
-            const pr = this._parent._renderContext;
-            if (this._parent._hasRenderContext()) {
-                const init = this._renderContext === this._worldContext;
-                if (init) {
-                    // First render context build: make sure that it is fully initialized correctly.
-                    // Otherwise, if we get into bounds later, the render context would not be initialized correctly.
-                    this._renderContext = new ElementCoreContext();
-                }
-
-                const r = this._renderContext;
-
-                // Update world coords/alpha.
-                if (init || (recalc & 1)) {
-                    r.alpha = pr.alpha * this._localAlpha;
-
-                    if (r.alpha < 1e-14) {
-                        r.alpha = 0;
-                    }
-                }
-
-                if (init || (recalc & 6)) {
-                    r.px = pr.px + this._localPx * pr.ta;
-                    r.py = pr.py + this._localPy * pr.td;
-                    if (pr.tb !== 0) r.px += this._localPy * pr.tb;
-                    if (pr.tc !== 0) r.py += this._localPx * pr.tc;
-                }
-
-                if (init) {
-                    // We set the recalc toggle, because we must make sure that the scissor is updated.
-                    recalc |= 2;
-                }
-
-                if (init || (recalc & 4)) {
-                    r.ta = this._localTa * pr.ta;
-                    r.tb = this._localTd * pr.tb;
-                    r.tc = this._localTa * pr.tc;
-                    r.td = this._localTd * pr.td;
-
-                    if (this._isComplex) {
-                        r.ta += this._localTc * pr.tb;
-                        r.tb += this._localTb * pr.ta;
-                        r.tc += this._localTc * pr.td;
-                        r.td += this._localTb * pr.tc;
-                    }
-                }
-            } else {
-                this._renderContext = this._worldContext;
-            }
-
-            if (this.ctx.updateTreeOrder === -1) {
-                this.ctx.updateTreeOrder = this._updateTreeOrder + 1;
-            } else {
-                this._updateTreeOrder = this.ctx.updateTreeOrder++;
-            }
-
-            // Determine whether we must use a 'renderTexture'.
-            const useRenderToTexture = this._renderToTextureEnabled && this._texturizer.mustRenderToTexture();
-            if (this._useRenderToTexture !== useRenderToTexture) {
-                // Coords must be changed.
-                this._recalc |= 2 + 4;
-
-                // Scissor may change: force update.
-                recalc |= 2;
-
-                if (!this._useRenderToTexture) {
-                    // We must release the texture.
-                    this._texturizer.release();
-                }
-            }
-            this._useRenderToTexture = useRenderToTexture;
-
-            const r = this._renderContext;
-            
-            const bboxW = this._dimsUnknown ? 2048 : this._w;
-            const bboxH = this._dimsUnknown ? 2048 : this._h;
-            
-            // Calculate a bbox for this element.
-            let sx, sy, ex, ey;
-            const rComplex = (r.tb !== 0) || (r.tc !== 0) || (r.ta < 0) || (r.td < 0);
-            if (rComplex) {
-                sx = Math.min(0, bboxW * r.ta, bboxW * r.ta + bboxH * r.tb, bboxH * r.tb) + r.px;
-                ex = Math.max(0, bboxW * r.ta, bboxW * r.ta + bboxH * r.tb, bboxH * r.tb) + r.px;
-                sy = Math.min(0, bboxW * r.tc, bboxW * r.tc + bboxH * r.td, bboxH * r.td) + r.py;
-                ey = Math.max(0, bboxW * r.tc, bboxW * r.tc + bboxH * r.td, bboxH * r.td) + r.py;
-            } else {
-                sx = r.px;
-                ex = r.px + r.ta * bboxW;
-                sy = r.py;
-                ey = r.py + r.td * bboxH;
-            }
-
-            if (this._dimsUnknown && (rComplex || this._localTa < 1 || this._localTb < 1)) {
-                // If we are dealing with a non-identity matrix, we must extend the bbox so that withinBounds and
-                //  scissors will include the complete range of (positive) dimensions up to ,lh.
-                const nx = this._x * pr.ta + this._y * pr.tb + pr.px;
-                const ny = this._x * pr.tc + this._y * pr.td + pr.py;
-                if (nx < sx) sx = nx;
-                if (ny < sy) sy = ny;
-                if (nx > ex) ex = nx;
-                if (ny > ey) ey = ny;
-            }
-
-            if (recalc & 6 || !this._scissor /* initial */) {
-                // Determine whether we must 'clip'.
-                if (this._clipping && r.isSquare()) {
-                    // If the parent renders to a texture, it's scissor should be ignored;
-                    const area = this._parent._useRenderToTexture ? this._parent._viewport : this._parent._scissor;
-                    if (area) {
-                        // Merge scissor areas.
-                        const lx = Math.max(area[0], sx);
-                        const ly = Math.max(area[1], sy);
-                        this._scissor = [
-                            lx,
-                            ly,
-                            Math.min(area[2] + area[0], ex) - lx,
-                            Math.min(area[3] + area[1], ey) - ly
-                        ];
-                    } else {
-                        this._scissor = [sx, sy, ex - sx, ey - sy];
-                    }
-                } else {
-                    // No clipping: reuse parent scissor.
-                    this._scissor = this._parent._useRenderToTexture ? this._parent._viewport : this._parent._scissor;
-                }
-            }
-
-            // Calculate the outOfBounds margin.
-            if (this._boundsMargin) {
-                this._recBoundsMargin = this._boundsMargin;
-            } else {
-                this._recBoundsMargin = this._parent._recBoundsMargin;
-            }
-
-            if (this._onAfterCalcs) {
-                // After calcs may change render coords, scissor and/or recBoundsMargin.
-                if (this._onAfterCalcs(this.element)) {
-                    // Recalculate bbox.
-                    if (rComplex) {
-                        sx = Math.min(0, bboxW * r.ta, bboxW * r.ta + bboxH * r.tb, bboxH * r.tb) + r.px;
-                        ex = Math.max(0, bboxW * r.ta, bboxW * r.ta + bboxH * r.tb, bboxH * r.tb) + r.px;
-                        sy = Math.min(0, bboxW * r.tc, bboxW * r.tc + bboxH * r.td, bboxH * r.td) + r.py;
-                        ey = Math.max(0, bboxW * r.tc, bboxW * r.tc + bboxH * r.td, bboxH * r.td) + r.py;
-                    } else {
-                        sx = r.px;
-                        ex = r.px + r.ta * bboxW;
-                        sy = r.py;
-                        ey = r.py + r.td * bboxH;
-                    }
-
-                    if (this._dimsUnknown && (rComplex || this._localTa < 1 || this._localTb < 1)) {
-                        const nx = this._x * pr.ta + this._y * pr.tb + pr.px;
-                        const ny = this._x * pr.tc + this._y * pr.td + pr.py;
-                        if (nx < sx) sx = nx;
-                        if (ny < sy) sy = ny;
-                        if (nx > ex) ex = nx;
-                        if (ny > ey) ey = ny;
-                    }
-                }
-            }
-
-            if (this._parent._outOfBounds === 2) {
-                // Inherit parent out of boundsness.
-                this._outOfBounds = 2;
-
-                if (this._withinBoundsMargin) {
-                    this._withinBoundsMargin = false;
-                    this.element._disableWithinBoundsMargin();
-                }
-            } else {
-                if (recalc & 6) {
-                    // Recheck if element is out-of-bounds (all settings that affect this should enable recalc bit 2 or 4).
-                    this._outOfBounds = 0;
-                    let withinMargin = true;
-
-                    // Offscreens are always rendered as long as the parent is within bounds.
-                    if (!this._renderToTextureEnabled || !this._texturizer || !this._texturizer.renderOffscreen) {
-                        if (this._scissor && (this._scissor[2] <= 0 || this._scissor[3] <= 0)) {
-                            // Empty scissor area.
-                            this._outOfBounds = 2;
-                        } else {
-                            // Use bbox to check out-of-boundness.
-                            if ((this._scissor[0] > ex) ||
-                                (this._scissor[1] > ey) ||
-                                (sx > (this._scissor[0] + this._scissor[2])) ||
-                                (sy > (this._scissor[1] + this._scissor[3]))
-                            ) {
-                                this._outOfBounds = 1;
-                            }
-
-                            if (this._outOfBounds) {
-                                if (this._clipping || this._useRenderToTexture || (this._clipbox && (bboxW && bboxH))) {
-                                    this._outOfBounds = 2;
-                                }
-                            }
-                        }
-
-                        withinMargin = (this._outOfBounds === 0);
-                        if (!withinMargin) {
-                            // Re-test, now with margins.
-                            if (this._recBoundsMargin) {
-                                withinMargin = !((ex < this._scissor[0] - this._recBoundsMargin[2]) ||
-                                    (ey < this._scissor[1] - this._recBoundsMargin[3]) ||
-                                    (sx > this._scissor[0] + this._scissor[2] + this._recBoundsMargin[0]) ||
-                                    (sy > this._scissor[1] + this._scissor[3] + this._recBoundsMargin[1]))
-                            } else {
-                                withinMargin = !((ex < this._scissor[0] - 100) ||
-                                    (ey < this._scissor[1] - 100) ||
-                                    (sx > this._scissor[0] + this._scissor[2] + 100) ||
-                                    (sy > this._scissor[1] + this._scissor[3] + 100))
-                            }
-                            if (withinMargin && this._outOfBounds === 2) {
-                                // Children must be visited because they may contain elements that are within margin, so must be visible.
-                                this._outOfBounds = 1;
-                            }
-                        }
-                    }
-
-                    if (this._withinBoundsMargin !== withinMargin) {
-                        this._withinBoundsMargin = withinMargin;
-
-                        if (this._withinBoundsMargin) {
-                            // This may update things (txLoaded events) in the element itself, but also in descendants and ancestors.
-
-                            // Changes in ancestors should be executed during the next call of the stage update. But we must
-                            // take care that the _recalc and _hasUpdates flags are properly registered. That's why we clear
-                            // both before entering the children, and use _pRecalc to transfer inherited updates instead of
-                            // _recalc directly.
-
-                            // Changes in descendants are automatically executed within the current update loop, though we must
-                            // take care to not update the hasUpdates flag unnecessarily in ancestors. We achieve this by making
-                            // sure that the hasUpdates flag of this element is turned on, which blocks it for ancestors.
-                            this._hasUpdates = true;
-
-                            const recalc = this._recalc;
-                            this._recalc = 0;
-                            this.element._enableWithinBoundsMargin();
-
-                            if (this._recalc) {
-                                // This element needs to be re-updated now, because we want the dimensions (and other changes) to be updated.
-                                return this.update();
-                            }
-
-                            this._recalc = recalc;
-                        } else {
-                            this.element._disableWithinBoundsMargin();
-                        }
-                    }
-                }
-            }
-
-            if (this._useRenderToTexture) {
-                // Set viewport necessary for children scissor calculation.
-                if (this._viewport) {
-                    this._viewport[2] = bboxW;
-                    this._viewport[3] = bboxH;
-                } else {
-                    this._viewport = [0, 0, bboxW, bboxH];
-                }
-            }
-
-            // Filter out bits that should not be copied to the children (currently all are).
-            this._pRecalc = (this._recalc & 135);
-
-            // Clear flags so that future updates are properly detected.
-            this._recalc = 0;
-            this._hasUpdates = false;
-
-            if (this._outOfBounds < 2) {
-                if (this._useRenderToTexture) {
-                    if (this._worldContext.isIdentity()) {
-                        // Optimization.
-                        // The world context is already identity: use the world context as render context to prevents the
-                        // ancestors from having to update the render context.
-                        this._renderContext = this._worldContext
-                    } else {
-                        // Temporarily replace the render coord attribs by the identity matrix.
-                        // This allows the children to calculate the render context.
-                        this._renderContext = ElementCoreContext.IDENTITY;
-                    }
-                }
-
-                if (this._children) {
-                    for (let i = 0, n = this._children.length; i < n; i++) {
-                        this._children[i].update();
-                    }
-                }
-
-                if (this._useRenderToTexture) {
-                    this._renderContext = r;
-                }
-            } else {
-                if (this._children) {
-                    for (let i = 0, n = this._children.length; i < n; i++) {
-                        if (this._children[i]._hasUpdates) {
-                            this._children[i].update();
-                        } else {
-                            // Make sure we don't lose the 'inherited' updates.
-                            this._children[i]._recalc |= this._pRecalc;
-                            this._children[i].updateOutOfBounds();
-                        }
-                    }
-                }
-            }
-
-            if (this._onAfterUpdate) {
-                this._onAfterUpdate(this.element);
-            }
+        if (this._hasUpdates || (this._recalc && visible) || (this._worldContext.alpha && !((this._parent._worldContext.alpha && this._localAlpha)))) {
+            this._update();
         } else {
             if (this.ctx.updateTreeOrder === -1 || this._updateTreeOrder >= this.ctx.updateTreeOrder) {
                 // If new tree order does not interfere with the current (gaps allowed) there's no need to traverse the branch.
@@ -2003,7 +2032,7 @@ export default class ElementCore {
                 let j = 0;
                 do {
                     a[ptr++] = b[j++];
-                } while(j < m);
+                } while (j < m);
 
                 if (a.length > ptr) {
                     // Slice old (unnecessary) part off array.
@@ -2030,7 +2059,7 @@ export default class ElementCore {
                             if (ptr === 0 || (mergeResult[ptr - 1] !== add)) {
                                 mergeResult[ptr++] = add;
                             }
-                        } while(j < m);
+                        } while (j < m);
                         break;
                     } else if (j >= m) {
                         do {
@@ -2038,10 +2067,10 @@ export default class ElementCore {
                             if (ptr === 0 || (mergeResult[ptr - 1] !== add)) {
                                 mergeResult[ptr++] = add;
                             }
-                        } while(i < n);
+                        } while (i < n);
                         break;
                     }
-                } while(true);
+                } while (true);
 
                 this._zIndexedChildren = mergeResult;
             }
@@ -2212,7 +2241,7 @@ class ElementCoreContext {
 }
 
 ElementCoreContext.IDENTITY = new ElementCoreContext();
-ElementCore.sortZIndexedChildren = function(a, b) {
+ElementCore.sortZIndexedChildren = function (a, b) {
     return (a._zIndex === b._zIndex ? a._updateTreeOrder - b._updateTreeOrder : a._zIndex - b._zIndex);
 }
 
