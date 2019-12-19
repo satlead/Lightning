@@ -368,6 +368,18 @@ window.attachInspector = function({Element, ElementCore, Stage, Component, Eleme
         }
     });
 
+    Object.defineProperty(Element.prototype, '_isFocused', {
+        get: function() {
+            return this.$isFocused;
+        },
+        set: function(v) {
+            if (this.$isFocused !== v) {
+                val(this, 'focused', v, null);
+                this.$isFocused = v;
+            }
+        }
+    });
+
     ElementCore.prototype.updateLeft = function() {
         var mx = this._mountX * this._w;
         var x = this._x - mx;
@@ -798,6 +810,11 @@ window.attachInspector = function({Element, ElementCore, Stage, Component, Eleme
     Element.prototype._setDisplayedTexture = function() {
         _setDisplayedTexture.apply(this, arguments)
         updateTextureAttribs(this)
+    }
+
+    lng.Component.prototype._focusChange = (newTarget, oldTarget)=>{
+        newTarget._isFocused = true;
+        oldTarget._isFocused = false;
     }
 };
 
