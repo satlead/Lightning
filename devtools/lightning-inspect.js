@@ -380,6 +380,30 @@ window.attachInspector = function({Element, ElementCore, Stage, Component, Eleme
         }
     });
 
+    Object.defineProperty(Element.prototype, '_inspectWidth', {
+        get: function() {
+            return this.$inspectWidth;
+        },
+        set: function(v) {
+            if (this.$inspectWidth !== v) {
+                val(this, 'width', v, null);
+                this.$inspectWidth = v;
+            }
+        }
+    });
+
+    Object.defineProperty(Element.prototype, '_inspectHeight', {
+        get: function() {
+            return this.$inspectHeight;
+        },
+        set: function(v) {
+            if (this.$inspectHeight !== v) {
+                val(this, 'height', v, null);
+                this.$inspectHeight = v;
+            }
+        }
+    });
+
     ElementCore.prototype.updateLeft = function() {
         var mx = this._mountX * this._w;
         var x = this._x - mx;
@@ -816,6 +840,13 @@ window.attachInspector = function({Element, ElementCore, Stage, Component, Eleme
         newTarget._isFocused = true;
         oldTarget._isFocused = false;
     }
+
+    lng.Element.prototype._onActive = function(){
+        this.on("txLoaded",()=>{
+            this._inspectWidth = this.renderWidth;
+            this._inspectHeight = this.renderHeight;
+        })
+    };
 };
 
 if (window.lng) {
