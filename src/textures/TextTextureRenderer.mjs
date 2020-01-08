@@ -245,6 +245,7 @@ export default class TextTextureRenderer {
 
         let linePositionX;
         let linePositionY;
+        let hlPositionY;
 
         let drawLines = [];
 
@@ -252,6 +253,7 @@ export default class TextTextureRenderer {
         for (let i = 0, n = lines.length; i < n; i++) {
             linePositionX = 0;
             linePositionY = (i * lineHeight) + offsetY;
+            hlPositionY = i * lineHeight;
 
             if (this._settings.textAlign === 'right') {
                 linePositionX += (innerWidth - lineWidths[i]);
@@ -260,7 +262,7 @@ export default class TextTextureRenderer {
             }
             linePositionX += paddingLeft;
 
-            drawLines.push({text: lines[i], x: linePositionX, y: linePositionY, w: lineWidths[i]});
+            drawLines.push({text: lines[i], x: linePositionX, y: linePositionY, w: lineWidths[i], hly: hlPositionY});
         }
 
         // Highlight.
@@ -275,7 +277,7 @@ export default class TextTextureRenderer {
             this._context.fillStyle = StageUtils.getRgbaString(color);
             for (let i = 0; i < drawLines.length; i++) {
                 let drawLine = drawLines[i];
-                this._context.fillRect((drawLine.x - hlPaddingLeft), (drawLine.y + offset), (drawLine.w + hlPaddingRight + hlPaddingLeft), hlHeight);
+                this._context.fillRect((drawLine.x - hlPaddingLeft), (drawLine.hly + offset), (drawLine.w + hlPaddingRight + hlPaddingLeft), hlHeight);
             }
         }
 
