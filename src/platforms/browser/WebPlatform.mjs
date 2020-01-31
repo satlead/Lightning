@@ -65,6 +65,10 @@ export default class WebPlatform {
         let cancelCb = undefined;
         let isPng = (src.indexOf(".png") >= 0);
         if (this._imageWorker) {
+            const isRelative = /^\/[^\/]/;
+            if (isRelative.test(src)) {
+                src = '.' + src;
+            }
             // WPE-specific image parser.
             const image = this._imageWorker.create(src);
             image.onError = function(err) {
